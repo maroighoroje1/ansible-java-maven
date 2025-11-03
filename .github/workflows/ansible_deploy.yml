@@ -1,0 +1,59 @@
+name: Ansible Deployment Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  ANSIBLE_SERVER: "3.94.106.38"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Copy files to ansible server
+        env:
+          ANSIBLE_SSH_KEY: ${{ secrets.ANSIBLE_SERVER_KEY }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SERVER_KEY }}
+        run: |
+          echo "Copying all necessary files to ansible control node"
+          
+          # Setup SSH key for ansible server
+          mkdir -p ~/.ssh
+          echo "$ANSIBLE_SSH_KEY" > ~/.ssh/ansible_key
+          chmod 600 ~/.ssh/ansible_key
+          
+          # Disable strict host key checking
+          ssh-keyscan -H $ANSIBLE_SERVER >> ~/.ssh/known_hosts
+          
+          # Copy ansible files to server
+          scp -i ~/.ssh/ansible_key -o StrictHostKeyChecking=no ansible/* root@${ANSIBLE_SERVER}:/root
+          
+          # Copy EC2 SSH key to ansible server
+          echo "$EC2_SSH_KEY" > /tmp/ssh-key.pem
+          chmod 600 /tmp/ssh-key.pem
+          scp -i ~/.ssh/ansible_key /tmp/ssh-key.pem root@${ANSIBLE_SERVER}:/root/ssh-key.pem
+      
+      - name: Execute ansible playbook
+        env:
+          ANSIBLE_SSH_KEY: ${{ secrets.ANSIBLE_SERVER_KEY }}
+        run: |
+          echo "Calling ansible playbook to configure ec2 instances"
+          
+          # Setup SSH key
+          mkdir -p ~/.ssh
+          echo "$ANSIBLE_SSH_KEY" > ~/.ssh/ansible_key
+          chmod 600 ~/.ssh/ansible_key
+          
+          # Execute preparation script
+          ssh -i ~/.ssh/ansible_key -o StrictHostKeyChecking=no root@${ANSIBLE_SERVER} 'bash -s' < prepare-ansible-server.sh
+          
+          # Run ansible playbook
+          ssh -i ~/.ssh/ansible_key -o StrictHostKeyChecking=no root@${ANSIBLE_SERVER} "ansible-playbook my-playbook.yaml"
