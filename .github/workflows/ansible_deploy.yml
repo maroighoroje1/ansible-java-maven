@@ -9,8 +9,8 @@ on:
 
 env:
   ANSIBLE_SERVER: "3.94.106.38"
-  ANSIBLE_USER: "root"
-  ANSIBLE_REMOTE_DIR: "/root"
+  ANSIBLE_USER: "ubuntu"  # Changed from root to ubuntu
+  ANSIBLE_REMOTE_DIR: "/home/ubuntu"  # Changed from /root to /home/ubuntu
 
 jobs:
   deploy:
@@ -43,38 +43,6 @@ jobs:
           
           echo "SSH environment setup completed"
 
-      - name: Fix remote shell profile (suppress output)
-        env:
-          ANSIBLE_SSH_KEY: ${{ secrets.ANSIBLE_SERVER_KEY }}
-        run: |
-          echo "Configuring remote shell for non-interactive sessions..."
-          
-          ssh -i ~/.ssh/ansible_key \
-            -o StrictHostKeyChecking=no \
-            -o BatchMode=yes \
-            -o LogLevel=ERROR \
-            $ANSIBLE_USER@$ANSIBLE_SERVER << 'ENDSSH'
-          
-          # Backup original files
-          [ -f ~/.bashrc ] && cp ~/.bashrc ~/.bashrc.backup 2>/dev/null || true
-          [ -f ~/.profile ] && cp ~/.profile ~/.profile.backup 2>/dev/null || true
-          [ -f ~/.bash_profile ] && cp ~/.bash_profile ~/.bash_profile.backup 2>/dev/null || true
-          
-          # Add guard to prevent output in non-interactive sessions
-          for file in ~/.bashrc ~/.profile ~/.bash_profile; do
-            if [ -f "$file" ]; then
-              # Check if guard already exists
-              if ! grep -q "# GITHUB_ACTIONS_GUARD" "$file"; then
-                # Add guard at the beginning of file
-                echo '# GITHUB_ACTIONS_GUARD - Prevent output in non-interactive sessions' | cat - "$file" > temp && mv temp "$file"
-                sed -i '1a case $- in\n    *i*) ;;\n    *) return;;\nesac' "$file"
-              fi
-            fi
-          done
-          
-          echo "Remote shell configured"
-          ENDSSH
-
       - name: Verify connectivity
         env:
           ANSIBLE_SSH_KEY: ${{ secrets.ANSIBLE_SERVER_KEY }}
@@ -86,7 +54,7 @@ jobs:
             -o BatchMode=yes \
             -o ConnectTimeout=10 \
             -o LogLevel=ERROR \
-            $ANSIBLE_USER@$ANSIBLE_SERVER 'echo "Connection successful"' || {
+            $ANSIBLE_USER@$ANSIBLE_SERVER 'echo "Connection successful as $USER"' || {
             echo "Failed to connect to Ansible server"
             exit 1
           }
@@ -120,6 +88,8 @@ jobs:
               -o LogLevel=ERROR \
               -b /tmp/sftp_batch \
               $ANSIBLE_USER@$ANSIBLE_SERVER
+            
+            echo "Ansible files transferred successfully"
           else
             echo "Error: ansible directory not found"
             exit 1
@@ -146,7 +116,7 @@ jobs:
             $ANSIBLE_USER@$ANSIBLE_SERVER \
             "chmod 600 $ANSIBLE_REMOTE_DIR/ssh-key.pem"
           
-          echo "File transfer completed successfully"
+          echo "EC2 SSH key transferred successfully"
 
       - name: Prepare Ansible server
         env:
@@ -168,7 +138,9 @@ jobs:
               -b /tmp/sftp_prep_batch \
               $ANSIBLE_USER@$ANSIBLE_SERVER
             
-            # Execute preparation script
+            echo "Preparation script transferred, executing..."
+            
+            # Execute preparation script with sudo if needed
             ssh -i ~/.ssh/ansible_key \
               -o StrictHostKeyChecking=no \
               -o BatchMode=yes \
@@ -176,6 +148,8 @@ jobs:
               $ANSIBLE_USER@$ANSIBLE_SERVER \
               "chmod +x $ANSIBLE_REMOTE_DIR/prepare-ansible-server.sh && \
                bash $ANSIBLE_REMOTE_DIR/prepare-ansible-server.sh"
+            
+            echo "Server preparation completed"
           else
             echo "Warning: prepare-ansible-server.sh not found, skipping preparation"
           fi
@@ -193,6 +167,12 @@ jobs:
             $ANSIBLE_USER@$ANSIBLE_SERVER \
             "cd $ANSIBLE_REMOTE_DIR/ansible-deployment && ansible-playbook my-playbook.yaml -v" || {
             echo "Ansible playbook execution failed"
+            echo "Attempting to show playbook directory contents for debugging..."
+            ssh -i ~/.ssh/ansible_key \
+              -o StrictHostKeyChecking=no \
+              -o BatchMode=yes \
+              $ANSIBLE_USER@$ANSIBLE_SERVER \
+              "ls -la $ANSIBLE_REMOTE_DIR/ansible-deployment/" || true
             exit 1
           }
           
@@ -223,5 +203,6 @@ jobs:
           echo "=========================================="
           echo "Status: SUCCESS"
           echo "Target: $ANSIBLE_SERVER"
+          echo "User: $ANSIBLE_USER"
           echo "Time: $(date)"
           echo "=========================================="
