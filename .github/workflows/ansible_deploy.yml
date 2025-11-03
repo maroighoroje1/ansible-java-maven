@@ -127,10 +127,10 @@ jobs:
           
           if [ -f "prepare-ansible-server.sh" ]; then
             # Transfer preparation script using SFTP
-            cat > /tmp/sftp_prep_batch <<EOF
+            cat > /tmp/sftp_prep_batch <<EOFPREP
           cd $ANSIBLE_REMOTE_DIR
           put prepare-ansible-server.sh
-          EOF
+          EOFPREP
             
             sftp -i ~/.ssh/ansible_key \
               -o StrictHostKeyChecking=no \
@@ -139,16 +139,16 @@ jobs:
               -b /tmp/sftp_prep_batch \
               $ANSIBLE_USER@$ANSIBLE_SERVER
             
-            echo "Preparation script transferred, executing..."
+            echo "Preparation script transferred, executing with sudo..."
             
-            # Execute preparation script with sudo if needed
+            # Execute preparation script with sudo
             ssh -i ~/.ssh/ansible_key \
               -o StrictHostKeyChecking=no \
               -o BatchMode=yes \
               -o LogLevel=ERROR \
               $ANSIBLE_USER@$ANSIBLE_SERVER \
               "chmod +x $ANSIBLE_REMOTE_DIR/prepare-ansible-server.sh && \
-               bash $ANSIBLE_REMOTE_DIR/prepare-ansible-server.sh"
+               sudo bash $ANSIBLE_REMOTE_DIR/prepare-ansible-server.sh"
             
             echo "Server preparation completed"
           else
