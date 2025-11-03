@@ -1,3 +1,15 @@
+name: Ansible Deployment Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  ANSIBLE_SERVER: "3.94.106.38"
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -21,10 +33,8 @@ jobs:
           # Disable strict host key checking
           ssh-keyscan -H $ANSIBLE_SERVER >> ~/.ssh/known_hosts
           
-          # --- 🎯 FIX APPLIED HERE ---
-          # Fix 1: Copy ansible files to server
-          # The -O flag is used for modern scp protocol (less prone to issues)
-          # The -o 'BatchMode=yes' and 'RequestTTY=no' are the key fixes
+          # --- FIX: Added -o BatchMode=yes and -o RequestTTY=no to suppress remote shell output ---
+          # Copy ansible files to server
           scp -i ~/.ssh/ansible_key \
             -o StrictHostKeyChecking=no \
             -o BatchMode=yes \
@@ -35,7 +45,7 @@ jobs:
           echo "$EC2_SSH_KEY" > /tmp/ssh-key.pem
           chmod 600 /tmp/ssh-key.pem
           
-          # Fix 2: Copy EC2 SSH key to ansible server
+          # FIX: Added -o BatchMode=yes and -o RequestTTY=no
           scp -i ~/.ssh/ansible_key \
             -o StrictHostKeyChecking=no \
             -o BatchMode=yes \
