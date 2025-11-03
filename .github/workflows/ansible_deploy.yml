@@ -2,69 +2,226 @@ name: Ansible Deployment Pipeline
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
   workflow_dispatch:
 
 env:
   ANSIBLE_SERVER: "3.94.106.38"
+  ANSIBLE_USER: "root"
+  ANSIBLE_REMOTE_DIR: "/root"
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
-      - name: Copy files to ansible server
+
+      - name: Setup SSH environment
         env:
           ANSIBLE_SSH_KEY: ${{ secrets.ANSIBLE_SERVER_KEY }}
           EC2_SSH_KEY: ${{ secrets.EC2_SERVER_KEY }}
         run: |
-          echo "Copying all necessary files to ansible control node"
-          
-          # Setup SSH key for ansible server
+          # Create SSH directory with proper permissions
           mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          
+          # Setup Ansible server SSH key
           echo "$ANSIBLE_SSH_KEY" > ~/.ssh/ansible_key
           chmod 600 ~/.ssh/ansible_key
           
-          # Disable strict host key checking
-          ssh-keyscan -H $ANSIBLE_SERVER >> ~/.ssh/known_hosts
+          # Setup EC2 SSH key for transfer
+          echo "$EC2_SSH_KEY" > ~/.ssh/ec2_key.pem
+          chmod 600 ~/.ssh/ec2_key.pem
           
-          # --- FIX: Added -o BatchMode=yes and -o RequestTTY=no to suppress remote shell output ---
-          # Copy ansible files to server
-          scp -i ~/.ssh/ansible_key \
-            -o StrictHostKeyChecking=no \
-            -o BatchMode=yes \
-            -o RequestTTY=no \
-            ansible/* root@${ANSIBLE_SERVER}:/root
+          # Add server to known_hosts (suppress output)
+          ssh-keyscan -H $ANSIBLE_SERVER >> ~/.ssh/known_hosts 2>/dev/null || true
           
-          # Copy EC2 SSH key to ansible server
-          echo "$EC2_SSH_KEY" > /tmp/ssh-key.pem
-          chmod 600 /tmp/ssh-key.pem
-          
-          # FIX: Added -o BatchMode=yes and -o RequestTTY=no
-          scp -i ~/.ssh/ansible_key \
-            -o StrictHostKeyChecking=no \
-            -o BatchMode=yes \
-            -o RequestTTY=no \
-            /tmp/ssh-key.pem root@${ANSIBLE_SERVER}:/root/ssh-key.pem
-      
-      - name: Execute ansible playbook
+          echo "SSH environment setup completed"
+
+      - name: Fix remote shell profile (suppress output)
         env:
           ANSIBLE_SSH_KEY: ${{ secrets.ANSIBLE_SERVER_KEY }}
         run: |
-          echo "Calling ansible playbook to configure ec2 instances"
+          echo "Configuring remote shell for non-interactive sessions..."
           
-          # Setup SSH key
-          mkdir -p ~/.ssh
-          echo "$ANSIBLE_SSH_KEY" > ~/.ssh/ansible_key
-          chmod 600 ~/.ssh/ansible_key
+          ssh -i ~/.ssh/ansible_key \
+            -o StrictHostKeyChecking=no \
+            -o BatchMode=yes \
+            -o LogLevel=ERROR \
+            $ANSIBLE_USER@$ANSIBLE_SERVER << 'ENDSSH'
           
-          # Execute preparation script
-          ssh -i ~/.ssh/ansible_key -o StrictHostKeyChecking=no root@${ANSIBLE_SERVER} 'bash -s' < prepare-ansible-server.sh
+          # Backup original files
+          [ -f ~/.bashrc ] && cp ~/.bashrc ~/.bashrc.backup 2>/dev/null || true
+          [ -f ~/.profile ] && cp ~/.profile ~/.profile.backup 2>/dev/null || true
+          [ -f ~/.bash_profile ] && cp ~/.bash_profile ~/.bash_profile.backup 2>/dev/null || true
           
-          # Run ansible playbook
-          ssh -i ~/.ssh/ansible_key -o StrictHostKeyChecking=no root@${ANSIBLE_SERVER} "ansible-playbook my-playbook.yaml"
+          # Add guard to prevent output in non-interactive sessions
+          for file in ~/.bashrc ~/.profile ~/.bash_profile; do
+            if [ -f "$file" ]; then
+              # Check if guard already exists
+              if ! grep -q "# GITHUB_ACTIONS_GUARD" "$file"; then
+                # Add guard at the beginning of file
+                echo '# GITHUB_ACTIONS_GUARD - Prevent output in non-interactive sessions' | cat - "$file" > temp && mv temp "$file"
+                sed -i '1a case $- in\n    *i*) ;;\n    *) return;;\nesac' "$file"
+              fi
+            fi
+          done
+          
+          echo "Remote shell configured"
+          ENDSSH
+
+      - name: Verify connectivity
+        env:
+          ANSIBLE_SSH_KEY: ${{ secrets.ANSIBLE_SERVER_KEY }}
+        run: |
+          echo "Testing connection to Ansible server..."
+          
+          ssh -i ~/.ssh/ansible_key \
+            -o StrictHostKeyChecking=no \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            -o LogLevel=ERROR \
+            $ANSIBLE_USER@$ANSIBLE_SERVER 'echo "Connection successful"' || {
+            echo "Failed to connect to Ansible server"
+            exit 1
+          }
+
+      - name: Transfer files using SFTP
+        env:
+          ANSIBLE_SSH_KEY: ${{ secrets.ANSIBLE_SERVER_KEY }}
+        run: |
+          echo "Transferring Ansible files via SFTP..."
+          
+          # Create remote directory first
+          ssh -i ~/.ssh/ansible_key \
+            -o StrictHostKeyChecking=no \
+            -o BatchMode=yes \
+            -o LogLevel=ERROR \
+            $ANSIBLE_USER@$ANSIBLE_SERVER \
+            "mkdir -p $ANSIBLE_REMOTE_DIR/ansible-deployment"
+          
+          # Use SFTP batch mode to transfer files
+          if [ -d "ansible" ]; then
+            # Create SFTP batch file
+            cat > /tmp/sftp_batch <<EOF
+          cd $ANSIBLE_REMOTE_DIR/ansible-deployment
+          put -r ansible/*
+          EOF
+            
+            # Execute SFTP transfer
+            sftp -i ~/.ssh/ansible_key \
+              -o StrictHostKeyChecking=no \
+              -o BatchMode=yes \
+              -o LogLevel=ERROR \
+              -b /tmp/sftp_batch \
+              $ANSIBLE_USER@$ANSIBLE_SERVER
+          else
+            echo "Error: ansible directory not found"
+            exit 1
+          fi
+          
+          # Transfer EC2 SSH key using SFTP
+          cat > /tmp/sftp_key_batch <<EOF
+          cd $ANSIBLE_REMOTE_DIR
+          put ~/.ssh/ec2_key.pem ssh-key.pem
+          EOF
+          
+          sftp -i ~/.ssh/ansible_key \
+            -o StrictHostKeyChecking=no \
+            -o BatchMode=yes \
+            -o LogLevel=ERROR \
+            -b /tmp/sftp_key_batch \
+            $ANSIBLE_USER@$ANSIBLE_SERVER
+          
+          # Set proper permissions on remote files
+          ssh -i ~/.ssh/ansible_key \
+            -o StrictHostKeyChecking=no \
+            -o BatchMode=yes \
+            -o LogLevel=ERROR \
+            $ANSIBLE_USER@$ANSIBLE_SERVER \
+            "chmod 600 $ANSIBLE_REMOTE_DIR/ssh-key.pem"
+          
+          echo "File transfer completed successfully"
+
+      - name: Prepare Ansible server
+        env:
+          ANSIBLE_SSH_KEY: ${{ secrets.ANSIBLE_SERVER_KEY }}
+        run: |
+          echo "Preparing Ansible server environment..."
+          
+          if [ -f "prepare-ansible-server.sh" ]; then
+            # Transfer preparation script using SFTP
+            cat > /tmp/sftp_prep_batch <<EOF
+          cd $ANSIBLE_REMOTE_DIR
+          put prepare-ansible-server.sh
+          EOF
+            
+            sftp -i ~/.ssh/ansible_key \
+              -o StrictHostKeyChecking=no \
+              -o BatchMode=yes \
+              -o LogLevel=ERROR \
+              -b /tmp/sftp_prep_batch \
+              $ANSIBLE_USER@$ANSIBLE_SERVER
+            
+            # Execute preparation script
+            ssh -i ~/.ssh/ansible_key \
+              -o StrictHostKeyChecking=no \
+              -o BatchMode=yes \
+              -o LogLevel=ERROR \
+              $ANSIBLE_USER@$ANSIBLE_SERVER \
+              "chmod +x $ANSIBLE_REMOTE_DIR/prepare-ansible-server.sh && \
+               bash $ANSIBLE_REMOTE_DIR/prepare-ansible-server.sh"
+          else
+            echo "Warning: prepare-ansible-server.sh not found, skipping preparation"
+          fi
+
+      - name: Execute Ansible playbook
+        env:
+          ANSIBLE_SSH_KEY: ${{ secrets.ANSIBLE_SERVER_KEY }}
+        run: |
+          echo "Executing Ansible playbook..."
+          
+          ssh -i ~/.ssh/ansible_key \
+            -o StrictHostKeyChecking=no \
+            -o BatchMode=yes \
+            -o LogLevel=ERROR \
+            $ANSIBLE_USER@$ANSIBLE_SERVER \
+            "cd $ANSIBLE_REMOTE_DIR/ansible-deployment && ansible-playbook my-playbook.yaml -v" || {
+            echo "Ansible playbook execution failed"
+            exit 1
+          }
+          
+          echo "Deployment completed successfully"
+
+      - name: Cleanup sensitive files
+        if: always()
+        env:
+          ANSIBLE_SSH_KEY: ${{ secrets.ANSIBLE_SERVER_KEY }}
+        run: |
+          echo "Cleaning up sensitive files from remote server..."
+          
+          ssh -i ~/.ssh/ansible_key \
+            -o StrictHostKeyChecking=no \
+            -o BatchMode=yes \
+            -o LogLevel=ERROR \
+            $ANSIBLE_USER@$ANSIBLE_SERVER \
+            "rm -f $ANSIBLE_REMOTE_DIR/ssh-key.pem \
+                   $ANSIBLE_REMOTE_DIR/prepare-ansible-server.sh" || true
+          
+          echo "Cleanup completed"
+
+      - name: Deployment summary
+        if: success()
+        run: |
+          echo "=========================================="
+          echo "Deployment Summary"
+          echo "=========================================="
+          echo "Status: SUCCESS"
+          echo "Target: $ANSIBLE_SERVER"
+          echo "Time: $(date)"
+          echo "=========================================="
