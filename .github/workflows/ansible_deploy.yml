@@ -96,10 +96,11 @@ jobs:
           fi
           
           # Transfer EC2 SSH key using SFTP
-          cat > /tmp/sftp_key_batch <<EOF
+          # Expand $HOME before writing to batch file
+          cat > /tmp/sftp_key_batch <<EOFKEY
           cd $ANSIBLE_REMOTE_DIR
-          put ~/.ssh/ec2_key.pem ssh-key.pem
-          EOF
+          put $HOME/.ssh/ec2_key.pem ssh-key.pem
+          EOFKEY
           
           sftp -i ~/.ssh/ansible_key \
             -o StrictHostKeyChecking=no \
